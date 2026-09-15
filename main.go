@@ -14,7 +14,7 @@ import (
 
 const usage = `retry-policy-convert --from FORMAT --to FORMAT [--input PATH] [--output PATH]
 
-Formats: aws, envoy
+Formats: aws, envoy, grpc
 
 --input and --output default to "-", meaning stdin/stdout. Either can
 also be a file path.
@@ -95,8 +95,14 @@ func decode(format string, raw []byte) (Policy, error) {
 			return Policy{}, err
 		}
 		return fromEnvoy(e)
+	case "grpc":
+		var g grpcPolicy
+		if err := json.Unmarshal(raw, &g); err != nil {
+			return Policy{}, err
+		}
+		return fromGRPC(g)
 	default:
-		return Policy{}, fmt.Errorf("unknown format %q (want aws or envoy)", format)
+		return Policy{}, fmt.Errorf("unknown format %q (want aws, envoy, or grpc)", format)
 	}
 }
 
@@ -107,8 +113,10 @@ func encode(format string, p Policy) ([]byte, error) {
 		v = toAWS(p)
 	case "envoy":
 		v = toEnvoy(p)
+	case "grpc":
+		v = toGRPC(p)
 	default:
-		return nil, fmt.Errorf("unknown format %q (want aws or envoy)", format)
+		return nil, fmt.Errorf("unknown format %q (want aws, envoy, or grpc)", format)
 	}
 	out, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

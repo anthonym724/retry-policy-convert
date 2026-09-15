@@ -256,7 +256,143 @@ func TestToEnvoy(t *testing.T) {
 	}
 }
 
-func TestParseEnvoyDuration(t *testing.T) {
+func TestFromGRPC(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      grpcPolicy
+		want    Policy
+		wantErr bool
+	}{
+		{
+			name: "both status codes map to both retry conditions",
+			in: grpcPolicy{
+				MaxAttempts:          4,
+				InitialBackoff:       "0.1s",
+				MaxBackoff:           "1s",
+				BackoffMultiplier:    2,
+				RetryableStatusCodes: []string{"INTERNAL", "UNAVAILABLE"},
+			},
+			want: Policy{
+				MaxAttempts:           4,
+				InitialDelay:          100 * time.Millisecond,
+				MaxDelay:              1 * time.Second,
+				RetryOnServerErrors:   true,
+				RetryOnConnectFailure: true,
+			},
+		},
+		{
+			name: "unrecognized status codes are ignored",
+			in: grpcPolicy{
+				MaxAttempts:          2,
+				InitialBackoff:       "0s",
+				MaxBackoff:           "0s",
+				RetryableStatusCodes: []string{"DEADLINE_EXCEEDED", "RESOURCE_EXHAUSTED"},
+			},
+			want: Policy{
+				MaxAttempts: 2,
+			},
+		},
+		{
+			name: "invalid initialBackoff is an error",
+			in: grpcPolicy{
+				InitialBackoff: "not-a-duration",
+				MaxBackoff:     "0s",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid maxBackoff is an error",
+			in: grpcPolicy{
+				InitialBackoff: "0s",
+				MaxBackoff:     "not-a-duration",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := fromGRPC(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("fromGRPC(%+v) = nil error, want one", tc.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("fromGRPC(%+v) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("fromGRPC(%+v) = %+v, want %+v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToGRPC(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Policy
+		want grpcPolicy
+	}{
+		{
+			name: "both conditions produce both status codes",
+			in: Policy{
+				MaxAttempts:           4,
+				InitialDelay:          100 * time.Millisecond,
+				MaxDelay:              1 * time.Second,
+				RetryOnServerErrors:   true,
+				RetryOnConnectFailure: true,
+			},
+			want: grpcPolicy{
+				MaxAttempts:          4,
+				InitialBackoff:       "0.1s",
+				MaxBackoff:           "1s",
+				BackoffMultiplier:    2,
+				RetryableStatusCodes: []string{"INTERNAL", "UNAVAILABLE"},
+			},
+		},
+		{
+			name: "no conditions produce no status codes",
+			in: Policy{
+				MaxAttempts: 1,
+			},
+			want: grpcPolicy{
+				MaxAttempts:       1,
+				InitialBackoff:    "0s",
+				MaxBackoff:        "0s",
+				BackoffMultiplier: 2,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toGRPC(tc.in)
+			if got.MaxAttempts != tc.want.MaxAttempts ||
+				got.InitialBackoff != tc.want.InitialBackoff ||
+				got.MaxBackoff != tc.want.MaxBackoff ||
+				got.BackoffMultiplier != tc.want.BackoffMultiplier ||
+				!slicesEqual(got.RetryableStatusCodes, tc.want.RetryableStatusCodes) {
+				t.Errorf("toGRPC(%+v) = %+v, want %+v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestParseProtoDuration(t *testing.T) {
 	cases := []struct {
 		name    string
 		in      string
@@ -274,24 +410,24 @@ func TestParseEnvoyDuration(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseEnvoyDuration(tc.in)
+			got, err := parseProtoDuration(tc.in)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("parseEnvoyDuration(%q) = %v, nil error, want an error", tc.in, got)
+					t.Fatalf("parseProtoDuration(%q) = %v, nil error, want an error", tc.in, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseEnvoyDuration(%q) unexpected error: %v", tc.in, err)
+				t.Fatalf("parseProtoDuration(%q) unexpected error: %v", tc.in, err)
 			}
 			if got != tc.want {
-				t.Errorf("parseEnvoyDuration(%q) = %v, want %v", tc.in, got, tc.want)
+				t.Errorf("parseProtoDuration(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestFormatEnvoyDuration(t *testing.T) {
+func TestFormatProtoDuration(t *testing.T) {
 	cases := []struct {
 		name string
 		in   time.Duration
@@ -304,20 +440,20 @@ func TestFormatEnvoyDuration(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatEnvoyDuration(tc.in); got != tc.want {
-				t.Errorf("formatEnvoyDuration(%v) = %q, want %q", tc.in, got, tc.want)
+			if got := formatProtoDuration(tc.in); got != tc.want {
+				t.Errorf("formatProtoDuration(%v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestEnvoyDurationRoundTrip(t *testing.T) {
+func TestProtoDurationRoundTrip(t *testing.T) {
 	durations := []time.Duration{0, 100 * time.Millisecond, 20 * time.Second, 90 * time.Minute}
 	for _, d := range durations {
-		s := formatEnvoyDuration(d)
-		got, err := parseEnvoyDuration(s)
+		s := formatProtoDuration(d)
+		got, err := parseProtoDuration(s)
 		if err != nil {
-			t.Fatalf("parseEnvoyDuration(%q) unexpected error: %v", s, err)
+			t.Fatalf("parseProtoDuration(%q) unexpected error: %v", s, err)
 		}
 		if got != d {
 			t.Errorf("round trip through %q: got %v, want %v", s, got, d)

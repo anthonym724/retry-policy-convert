@@ -41,6 +41,19 @@ type envoyPolicy struct {
 	} `json:"retry_back_off"`
 }
 
+// grpcPolicy mirrors the retryPolicy object nested in a methodConfig entry
+// of a gRPC service config, as described in
+// https://github.com/grpc/grpc/blob/master/doc/service_config.md. This is
+// the retryPolicy object on its own, not the methodConfig wrapper around
+// it, matching how awsPolicy and envoyPolicy skip their own wrappers.
+type grpcPolicy struct {
+	MaxAttempts          int      `json:"maxAttempts"`
+	InitialBackoff       string   `json:"initialBackoff"`
+	MaxBackoff           string   `json:"maxBackoff"`
+	BackoffMultiplier    float64  `json:"backoffMultiplier"`
+	RetryableStatusCodes []string `json:"retryableStatusCodes"`
+}
+
 func fromAWS(a awsPolicy) Policy {
 	return Policy{
 		MaxAttempts: a.MaxAttempts,
@@ -67,11 +80,11 @@ func toAWS(p Policy) awsPolicy {
 }
 
 func fromEnvoy(e envoyPolicy) (Policy, error) {
-	base, err := parseEnvoyDuration(e.RetryBackOff.BaseInterval)
+	base, err := parseProtoDuration(e.RetryBackOff.BaseInterval)
 	if err != nil {
 		return Policy{}, fmt.Errorf("base_interval: %w", err)
 	}
-	max, err := parseEnvoyDuration(e.RetryBackOff.MaxInterval)
+	max, err := parseProtoDuration(e.RetryBackOff.MaxInterval)
 	if err != nil {
 		return Policy{}, fmt.Errorf("max_interval: %w", err)
 	}
@@ -100,15 +113,80 @@ func toEnvoy(p Policy) envoyPolicy {
 	if e.NumRetries < 0 {
 		e.NumRetries = 0
 	}
-	e.RetryBackOff.BaseInterval = formatEnvoyDuration(p.InitialDelay)
-	e.RetryBackOff.MaxInterval = formatEnvoyDuration(p.MaxDelay)
+	e.RetryBackOff.BaseInterval = formatProtoDuration(p.InitialDelay)
+	e.RetryBackOff.MaxInterval = formatProtoDuration(p.MaxDelay)
 	return e
 }
 
-// parseEnvoyDuration parses the string form of a google.protobuf.Duration
-// as Envoy renders it in JSON: a decimal number of seconds with a
-// trailing "s", e.g. "0.1s" or "20s".
-func parseEnvoyDuration(s string) (time.Duration, error) {
+// defaultBackoffMultiplier is used whenever converting into gRPC's format.
+// Neither AWS's nor Envoy's retry shapes expose a configurable backoff
+// multiplier, and 2 is the doubling behavior both of them implement, so
+// there's no better source for the value than a fixed default.
+const defaultBackoffMultiplier = 2
+
+// gRPC service config status codes representing the same two retry
+// conditions AWS and Envoy expose. UNAVAILABLE is gRPC's status for a
+// connection-level failure; INTERNAL is its closest analog to an AWS/Envoy
+// server error response. Any other status code in a gRPC policy's
+// retryableStatusCodes is dropped on the way into Policy, and no other
+// code is ever added on the way out.
+const (
+	grpcServerErrorCode    = "INTERNAL"
+	grpcConnectFailureCode = "UNAVAILABLE"
+)
+
+func fromGRPC(g grpcPolicy) (Policy, error) {
+	initial, err := parseProtoDuration(g.InitialBackoff)
+	if err != nil {
+		return Policy{}, fmt.Errorf("initialBackoff: %w", err)
+	}
+	max, err := parseProtoDuration(g.MaxBackoff)
+	if err != nil {
+		return Policy{}, fmt.Errorf("maxBackoff: %w", err)
+	}
+
+	var serverErrors, connectFailure bool
+	for _, code := range g.RetryableStatusCodes {
+		switch code {
+		case grpcServerErrorCode:
+			serverErrors = true
+		case grpcConnectFailureCode:
+			connectFailure = true
+		}
+	}
+
+	return Policy{
+		MaxAttempts:           g.MaxAttempts,
+		InitialDelay:          initial,
+		MaxDelay:              max,
+		RetryOnServerErrors:   serverErrors,
+		RetryOnConnectFailure: connectFailure,
+	}, nil
+}
+
+func toGRPC(p Policy) grpcPolicy {
+	var codes []string
+	if p.RetryOnServerErrors {
+		codes = append(codes, grpcServerErrorCode)
+	}
+	if p.RetryOnConnectFailure {
+		codes = append(codes, grpcConnectFailureCode)
+	}
+
+	return grpcPolicy{
+		MaxAttempts:          p.MaxAttempts,
+		InitialBackoff:       formatProtoDuration(p.InitialDelay),
+		MaxBackoff:           formatProtoDuration(p.MaxDelay),
+		BackoffMultiplier:    defaultBackoffMultiplier,
+		RetryableStatusCodes: codes,
+	}
+}
+
+// parseProtoDuration parses the string form of a google.protobuf.Duration,
+// which both Envoy and gRPC service config use for their backoff interval
+// fields: a decimal number of seconds with a trailing "s", e.g. "0.1s" or
+// "20s".
+func parseProtoDuration(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if !strings.HasSuffix(s, "s") {
 		return 0, fmt.Errorf("invalid duration %q: must end in \"s\"", s)
@@ -120,6 +198,6 @@ func parseEnvoyDuration(s string) (time.Duration, error) {
 	return time.Duration(secs * float64(time.Second)), nil
 }
 
-func formatEnvoyDuration(d time.Duration) string {
+func formatProtoDuration(d time.Duration) string {
 	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
 }

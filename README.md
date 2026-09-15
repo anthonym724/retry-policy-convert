@@ -9,10 +9,11 @@ a service mesh config, someone ends up translating attempt counts and
 millisecond delays into Envoy's duration strings by hand. This tool
 does that translation.
 
-It currently supports two formats:
+It currently supports three formats:
 
 - `aws` — the retry section of an AWS SDK config
 - `envoy` — Envoy's route-level `RetryPolicy`
+- `grpc` — the `retryPolicy` object from a gRPC service config `methodConfig` entry
 
 ## Usage
 
@@ -64,8 +65,31 @@ Output (`--to envoy`):
 }
 ```
 
+Output (`--to grpc`):
+
+```json
+{
+  "maxAttempts": 3,
+  "initialBackoff": "0.1s",
+  "maxBackoff": "20s",
+  "backoffMultiplier": 2,
+  "retryableStatusCodes": [
+    "INTERNAL",
+    "UNAVAILABLE"
+  ]
+}
+```
+
 Note that `num_retries` is one less than `max_attempts`: AWS counts the
-initial attempt, Envoy counts only the retries after it.
+initial attempt, Envoy counts only the retries after it. gRPC's
+`maxAttempts` counts the initial attempt too, matching AWS.
+
+`grpc`'s `retryableStatusCodes` is a list of named gRPC status codes,
+not a boolean per condition. This tool only recognizes two of them:
+`UNAVAILABLE`, gRPC's status for a connection-level failure, and
+`INTERNAL`, its closest analog to an AWS/Envoy server error response.
+Any other status code in an input file is dropped, and no other code
+is ever produced in output.
 
 ## Building
 
@@ -77,7 +101,17 @@ No third-party dependencies — standard library only.
 
 ## Status
 
-Early. Only two formats are wired up and the mapping between them is
-necessarily lossy in both directions (Envoy's `retry_on` conditions are
-richer than AWS's retry modes, and vice versa for adaptive throttling
-behavior). See the roadmap for what's next.
+Early. The mapping between formats is necessarily lossy in places: each
+format's retry conditions carve up the space of "what's retryable"
+differently (Envoy's `retry_on` values, AWS's retry modes, and gRPC's
+per-status-code list don't line up one to one), and gRPC's
+`backoffMultiplier` has no equivalent to read from when converting into
+it, so it's always written as a fixed default.
+
+## Roadmap
+
+- Preserve fields a format doesn't share with `Policy` (e.g. Envoy's
+  `per_try_timeout`) instead of dropping them on conversion.
+- Add a `--validate` mode that only checks whether a file parses as a
+  given format, without converting it.
+- Package a release binary and add install instructions here.
